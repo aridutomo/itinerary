@@ -26,7 +26,7 @@ type Notification = {
   createdTime: string;
 };
 
-const POLL_MS = 30_000;
+const POLL_MS = 10_000; // Lebih cepat (10 detik) untuk efek real-time
 const SESSION_KEY = "notif-modal-auto-shown";
 
 export default function NotificationBell() {
@@ -36,40 +36,54 @@ export default function NotificationBell() {
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [lastId, setLastId] = useState<string | null>(null);
 
-  const refresh = useCallback(async (isInitial = false) => {
-    setLoading(true);
+  const refresh = useCallback(async (isInitial = false, silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await fetch("/api/notifications", { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
       const unreadItems = (data.items ?? []).filter((n: Notification) => !n.dibaca);
+      
       setItems(unreadItems);
       setUnread(data.unread ?? 0);
 
-      // Auto-show jika ada yang belum dibaca dan belum pernah muncul di sesi ini
+      const latest = unreadItems[0];
+      
+      // 1. Auto-show awal sesi
       if (isInitial && unreadItems.length > 0 && !sessionStorage.getItem(SESSION_KEY)) {
         sessionStorage.setItem(SESSION_KEY, "1");
         setOpen(true);
+        if (latest) setLastId(latest.id);
+      } 
+      // 2. Real-time trigger: Jika ada notifikasi baru yang masuk saat sedang buka aplikasi
+      else if (!isInitial && latest && latest.id !== lastId) {
+        setOpen(true);
+        setLastId(latest.id);
+      }
+      // Update lastId jika ada data tapi belum di-set
+      else if (latest && !lastId) {
+        setLastId(latest.id);
       }
     } catch {
       // Diam: notifikasi best-effort.
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  }, []);
+  }, [lastId]);
 
   // Polling berkala selama user login.
   useEffect(() => {
     if (status !== "authenticated") return;
-    refresh(true); // Tandai sebagai pemanggilan awal
-    const t = setInterval(() => refresh(false), POLL_MS);
+    refresh(true, false); 
+    const t = setInterval(() => refresh(false, true), POLL_MS);
     return () => clearInterval(t);
   }, [status, refresh]);
 
   function handleToggle() {
     setOpen(true);
-    refresh();
+    refresh(false, false);
   }
 
   function markAllRead() {
