@@ -1,10 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { Bell, Loader2, MapPinned, UserPlus } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 
 type Notification = {
   id: string;
@@ -18,6 +27,7 @@ type Notification = {
 };
 
 const POLL_MS = 30_000;
+const SESSION_KEY = "notif-modal-auto-shown";
 
 export default function NotificationBell() {
   const { status } = useSession();
@@ -26,57 +36,55 @@ export default function NotificationBell() {
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
-  const panelRef = useRef<HTMLDivElement>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (isInitial = false) => {
+    setLoading(true);
     try {
       const res = await fetch("/api/notifications", { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
-      setItems(data.items ?? []);
+      const unreadItems = (data.items ?? []).filter((n: Notification) => !n.dibaca);
+      setItems(unreadItems);
       setUnread(data.unread ?? 0);
+
+      // Auto-show jika ada yang belum dibaca dan belum pernah muncul di sesi ini
+      if (isInitial && unreadItems.length > 0 && !sessionStorage.getItem(SESSION_KEY)) {
+        sessionStorage.setItem(SESSION_KEY, "1");
+        setOpen(true);
+      }
     } catch {
       // Diam: notifikasi best-effort.
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   // Polling berkala selama user login.
   useEffect(() => {
     if (status !== "authenticated") return;
-    refresh();
-    const t = setInterval(refresh, POLL_MS);
+    refresh(true); // Tandai sebagai pemanggilan awal
+    const t = setInterval(() => refresh(false), POLL_MS);
     return () => clearInterval(t);
   }, [status, refresh]);
 
-  // Tutup saat klik di luar panel.
-  useEffect(() => {
-    if (!open) return;
-    function onClick(e: MouseEvent) {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, [open]);
+  function handleToggle() {
+    setOpen(true);
+    refresh();
+  }
 
-  async function toggle() {
-    const next = !open;
-    setOpen(next);
-    if (next) {
-      setLoading(true);
-      await refresh();
-      setLoading(false);
-      // Buka panel = anggap semua sudah dibaca.
-      if (unread > 0) {
-        setUnread(0);
-        setItems((prev) => prev.map((n) => ({ ...n, dibaca: true })));
-        fetch("/api/notifications/read", { method: "POST" }).catch(() => {});
-      }
-    }
+  function markAllRead() {
+    fetch("/api/notifications/read", { method: "POST" }).catch(() => {});
+    setUnread(0);
+    setItems([]);
+  }
+
+  function tandaiDibaca() {
+    markAllRead();
+    setOpen(false);
   }
 
   function openTrip(n: Notification) {
+    markAllRead();
     setOpen(false);
     if (n.tripId) router.push(`/trip/${n.tripId}`);
   }
@@ -84,9 +92,9 @@ export default function NotificationBell() {
   if (status !== "authenticated") return null;
 
   return (
-    <div className="relative" ref={panelRef}>
+    <>
       <button
-        onClick={toggle}
+        onClick={handleToggle}
         aria-label="Notifikasi"
         className="relative flex h-9 w-9 items-center justify-center rounded-full border bg-background text-muted-foreground transition-colors duration-200 hover:bg-accent hover:text-foreground"
       >
@@ -98,23 +106,32 @@ export default function NotificationBell() {
         )}
       </button>
 
-      {open && (
-        <div className="absolute right-0 z-30 mt-2 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border bg-popover/95 shadow-lift backdrop-blur-xl">
-          <div className="flex items-center justify-between border-b px-4 py-3">
-            <span className="text-sm font-semibold text-foreground">
-              Notifikasi
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-md gap-0 p-0">
+          <DialogHeader className="flex-row items-center gap-3 space-y-0 border-b px-5 py-4">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+              <Bell className="h-5 w-5" />
             </span>
-            {loading && (
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-            )}
-          </div>
+            <div className="min-w-0">
+              <DialogTitle>Notifikasi Belum Dibaca</DialogTitle>
+              <DialogDescription>
+                {loading ? (
+                  <span className="flex items-center gap-1">
+                    <Loader2 className="h-3 w-3 animate-spin" /> Memuat...
+                  </span>
+                ) : (
+                  `${items.length} pemberitahuan baru menunggu`
+                )}
+              </DialogDescription>
+            </div>
+          </DialogHeader>
 
-          <div className="max-h-[60vh] overflow-auto">
+          <div className="max-h-[55vh] overflow-auto">
             {items.length === 0 ? (
               <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
                 <Bell className="h-7 w-7 text-muted-foreground/40" />
                 <p className="text-sm text-muted-foreground">
-                  Belum ada notifikasi
+                  Tidak ada notifikasi belum dibaca
                 </p>
               </div>
             ) : (
@@ -123,10 +140,7 @@ export default function NotificationBell() {
                   <li key={n.id}>
                     <button
                       onClick={() => openTrip(n)}
-                      className={cn(
-                        "flex w-full items-start gap-3 px-4 py-3 text-left transition-colors duration-200 hover:bg-accent",
-                        !n.dibaca && "bg-primary/5"
-                      )}
+                      className="flex w-full items-start gap-3 px-5 py-3.5 text-left transition-colors duration-200 hover:bg-accent"
                     >
                       <span
                         className={cn(
@@ -152,17 +166,29 @@ export default function NotificationBell() {
                           </span>
                         )}
                       </span>
-                      {!n.dibaca && (
-                        <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-rose-500" />
-                      )}
                     </button>
                   </li>
                 ))}
               </ul>
             )}
           </div>
-        </div>
-      )}
-    </div>
+
+          <DialogFooter className="border-t px-5 py-3.5">
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={() => setOpen(false)}
+            >
+              Nanti
+            </Button>
+            {items.length > 0 && (
+              <Button className="flex-1" onClick={tandaiDibaca}>
+                Tandai sudah dibaca
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
