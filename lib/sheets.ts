@@ -1,6 +1,11 @@
 import { google, sheets_v4 } from "googleapis";
+import { supabase } from "./supabase";
+
+// Tambahkan flag untuk memilih database
+const DB_TYPE = process.env.DB_TYPE || "sheets"; // default tetap sheets sampai siap pindah
 
 // ===== Model data =====
+// ... (rest of models remains the same)
 // Trip (Rencana): perjalanan utama — dari mana ke mana, tanggal mulai s/d selesai,
 // dan daftar orang yang ikut.
 export type Trip = {
@@ -143,6 +148,8 @@ const DETAILS_HEADER = [
 function getServiceAccountCreds() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (!raw) {
+    // Jangan throw error di sini jika sedang menggunakan Supabase
+    if (DB_TYPE === "supabase") return null;
     throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON env tidak ditemukan");
   }
   try {
@@ -161,6 +168,9 @@ let cachedClient: sheets_v4.Sheets | null = null;
 async function getSheetsClient(): Promise<sheets_v4.Sheets> {
   if (cachedClient) return cachedClient;
   const creds = getServiceAccountCreds();
+  if (!creds) {
+    throw new Error("Gagal menginisialisasi Google Sheets: Credential tidak ditemukan");
+  }
   const auth = new google.auth.GoogleAuth({
     credentials: creds,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
@@ -311,7 +321,7 @@ export function canAccessTrip(trip: Trip, user: SessionUser): boolean {
   return userMatchesOrang(user, trip.orang);
 }
 
-export async function listTrips(): Promise<Trip[]> {
+async function listTripsSheets(): Promise<Trip[]> {
   const sheets = await getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
   await ensureTab(sheets, spreadsheetId, TRIPS_TAB, TRIPS_HEADER);
@@ -325,18 +335,82 @@ export async function listTrips(): Promise<Trip[]> {
     .map((r) => rowToTrip(r as string[]));
 }
 
+async function listTripsSupabase(): Promise<Trip[]> {
+  try {
+    const { data, error } = await supabase
+      .from("trips")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    return (data || []).map((t: any) => ({
+      id: t.id,
+      nama: t.nama,
+      lokasiAsal: t.lokasi_asal,
+      lokasiTujuan: t.lokasi_tujuan,
+      tanggalMulai: t.tanggal_mulai,
+      tanggalSelesai: t.tanggal_selesai,
+      orang: t.orang || [],
+      createdBy: t.created_by,
+      createdTime: t.created_at,
+      modifiedBy: t.created_by,
+      modifiedTime: t.updated_at,
+    }));
+  } catch (e: any) {
+    console.error("Supabase listTrips Error:", e.message);
+    throw e;
+  }
+}
+
+export async function listTrips(): Promise<Trip[]> {
+  return DB_TYPE === "supabase" ? listTripsSupabase() : listTripsSheets();
+}
+
 // Trip yang boleh dilihat oleh user: dibuat olehnya atau ia diundang.
 export async function listTripsForUser(user: SessionUser): Promise<Trip[]> {
   const trips = await listTrips();
   return trips.filter((t) => canAccessTrip(t, user));
 }
 
-export async function getTrip(id: string): Promise<Trip | null> {
-  const trips = await listTrips();
+async function getTripSheets(id: string): Promise<Trip | null> {
+  const trips = await listTripsSheets();
   return trips.find((t) => t.id === id) ?? null;
 }
 
-export async function appendTrip(
+async function getTripSupabase(id: string): Promise<Trip | null> {
+  try {
+    const { data, error } = await supabase
+      .from("trips")
+      .select("*")
+      .eq("id", id)
+      .single();
+    if (error) {
+      if (error.code === "PGRST116") return null;
+      throw error;
+    }
+    return {
+      id: data.id,
+      nama: data.nama,
+      lokasiAsal: data.lokasi_asal,
+      lokasiTujuan: data.lokasi_tujuan,
+      tanggalMulai: data.tanggal_mulai,
+      tanggalSelesai: data.tanggal_selesai,
+      orang: data.orang || [],
+      createdBy: data.created_by,
+      createdTime: data.created_at,
+      modifiedBy: data.created_by,
+      modifiedTime: data.updated_at,
+    };
+  } catch (e: any) {
+    console.error(`Supabase getTrip Error (${id}):`, e.message);
+    throw e;
+  }
+}
+
+export async function getTrip(id: string): Promise<Trip | null> {
+  return DB_TYPE === "supabase" ? getTripSupabase(id) : getTripSheets(id);
+}
+
+async function appendTripSheets(
   data: TripInput,
   actor: string
 ): Promise<Trip> {
@@ -367,8 +441,57 @@ export async function appendTrip(
   return trip;
 }
 
+async function appendTripSupabase(
+  data: TripInput,
+  actor: string
+): Promise<Trip> {
+  try {
+    const { data: newTrip, error } = await supabase
+      .from("trips")
+      .insert([
+        {
+          nama: data.nama,
+          lokasi_asal: data.lokasiAsal,
+          lokasi_tujuan: data.lokasiTujuan,
+          tanggal_mulai: data.tanggalMulai,
+          tanggal_selesai: data.tanggalSelesai,
+          orang: data.orang || [],
+          created_by: actor,
+        },
+      ])
+      .select()
+      .single();
+    if (error) throw error;
+    return {
+      id: newTrip.id,
+      nama: newTrip.nama,
+      lokasiAsal: newTrip.lokasi_asal,
+      lokasiTujuan: newTrip.lokasi_tujuan,
+      tanggalMulai: newTrip.tanggal_mulai,
+      tanggalSelesai: newTrip.tanggal_selesai,
+      orang: newTrip.orang || [],
+      createdBy: newTrip.created_by,
+      createdTime: newTrip.created_at,
+      modifiedBy: newTrip.created_by,
+      modifiedTime: newTrip.updated_at,
+    };
+  } catch (e: any) {
+    console.error("Supabase appendTrip Error:", e.message);
+    throw e;
+  }
+}
+
+export async function appendTrip(
+  data: TripInput,
+  actor: string
+): Promise<Trip> {
+  return DB_TYPE === "supabase"
+    ? appendTripSupabase(data, actor)
+    : appendTripSheets(data, actor);
+}
+
 // Update sebagian field trip (mis. daftar orang). Mengembalikan trip terbaru.
-export async function updateTrip(
+async function updateTripSheets(
   id: string,
   patch: TripPatch,
   actor: string
@@ -401,7 +524,63 @@ export async function updateTrip(
   return updated;
 }
 
-export async function deleteTrip(id: string): Promise<boolean> {
+async function updateTripSupabase(
+  id: string,
+  patch: TripPatch,
+  actor: string
+): Promise<Trip | null> {
+  try {
+    const updateData: any = {};
+    if (patch.nama !== undefined) updateData.nama = patch.nama;
+    if (patch.lokasiAsal !== undefined) updateData.lokasi_asal = patch.lokasiAsal;
+    if (patch.lokasiTujuan !== undefined) updateData.lokasi_tujuan = patch.lokasiTujuan;
+    if (patch.tanggalMulai !== undefined) updateData.tanggal_mulai = patch.tanggalMulai;
+    if (patch.tanggalSelesai !== undefined) updateData.tanggal_selesai = patch.tanggalSelesai;
+    if (patch.orang !== undefined) updateData.orang = patch.orang;
+    updateData.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from("trips")
+      .update(updateData)
+      .eq("id", id)
+      .select()
+      .single();
+    
+    if (error) {
+      if (error.code === "PGRST116") return null;
+      throw error;
+    }
+    
+    return {
+      id: data.id,
+      nama: data.nama,
+      lokasiAsal: data.lokasi_asal,
+      lokasiTujuan: data.lokasi_tujuan,
+      tanggalMulai: data.tanggal_mulai,
+      tanggalSelesai: data.tanggal_selesai,
+      orang: data.orang || [],
+      createdBy: data.created_by,
+      createdTime: data.created_at,
+      modifiedBy: data.created_by,
+      modifiedTime: data.updated_at,
+    };
+  } catch (e: any) {
+    console.error(`Supabase updateTrip Error (${id}):`, e.message);
+    throw e;
+  }
+}
+
+export async function updateTrip(
+  id: string,
+  patch: TripPatch,
+  actor: string
+): Promise<Trip | null> {
+  return DB_TYPE === "supabase"
+    ? updateTripSupabase(id, patch, actor)
+    : updateTripSheets(id, patch, actor);
+}
+
+async function deleteTripSheets(id: string): Promise<boolean> {
   const sheets = await getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
   const res = await sheets.spreadsheets.values.get({
@@ -435,8 +614,23 @@ export async function deleteTrip(id: string): Promise<boolean> {
   });
 
   // Hapus juga semua detail milik trip ini.
-  await deleteDetailsByTrip(id);
+  await deleteDetailsByTripSheets(id);
   return true;
+}
+
+async function deleteTripSupabase(id: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.from("trips").delete().eq("id", id);
+    if (error) throw error;
+    return true;
+  } catch (e: any) {
+    console.error(`Supabase deleteTrip Error (${id}):`, e.message);
+    throw e;
+  }
+}
+
+export async function deleteTrip(id: string): Promise<boolean> {
+  return DB_TYPE === "supabase" ? deleteTripSupabase(id) : deleteTripSheets(id);
 }
 
 // ===== Users =====
@@ -476,7 +670,7 @@ function userToRow(u: User): string[] {
   ];
 }
 
-export async function listUsers(): Promise<User[]> {
+async function listUsersSheets(): Promise<User[]> {
   const sheets = await getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
   await ensureTab(sheets, spreadsheetId, USERS_TAB, USERS_HEADER);
@@ -490,9 +684,69 @@ export async function listUsers(): Promise<User[]> {
     .map((r) => rowToUser(r as string[]));
 }
 
-export async function getUserById(id: string): Promise<User | null> {
-  const users = await listUsers();
+async function listUsersSupabase(): Promise<User[]> {
+  try {
+    const { data, error } = await supabase
+      .from("users")
+      .select("*")
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return (data || []).map((u: any) => ({
+      id: u.id,
+      nama: u.nama,
+      namaLengkap: u.nama_lengkap,
+      password: u.password,
+      aktif: u.aktif,
+      createdBy: u.id,
+      createdTime: u.created_at,
+      modifiedBy: u.id,
+      modifiedTime: u.updated_at,
+    }));
+  } catch (e: any) {
+    console.error("Supabase listUsers Error:", e.message);
+    return [];
+  }
+}
+
+export async function listUsers(): Promise<User[]> {
+  return DB_TYPE === "supabase" ? listUsersSupabase() : listUsersSheets();
+}
+
+async function getUserByIdSheets(id: string): Promise<User | null> {
+  const users = await listUsersSheets();
   return users.find((u) => u.id === id) ?? null;
+}
+
+async function getUserByIdSupabase(id: string): Promise<User | null> {
+  try {
+    const { data, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", id)
+      .single();
+    if (error) {
+      if (error.code === "PGRST116") return null;
+      throw error;
+    }
+    return {
+      id: data.id,
+      nama: data.nama,
+      namaLengkap: data.nama_lengkap,
+      password: data.password,
+      aktif: data.aktif,
+      createdBy: data.id,
+      createdTime: data.created_at,
+      modifiedBy: data.id,
+      modifiedTime: data.updated_at,
+    };
+  } catch (e: any) {
+    console.error(`Supabase getUserById Error (${id}):`, e.message);
+    return null;
+  }
+}
+
+export async function getUserById(id: string): Promise<User | null> {
+  return DB_TYPE === "supabase" ? getUserByIdSupabase(id) : getUserByIdSheets(id);
 }
 
 // Verifikasi kredensial untuk login. Mengembalikan user tanpa password bila
@@ -501,18 +755,34 @@ export async function verifyUser(
   id: string,
   password: string
 ): Promise<Omit<User, "password"> | null> {
-  const user = await getUserById(id);
-  if (!user || user.password !== password || !user.aktif) return null;
-  const { password: _pw, ...rest } = user;
-  return rest;
+  try {
+    const user = await getUserById(id);
+    if (!user) {
+      console.log(`VerifyUser: User ${id} tidak ditemukan`);
+      return null;
+    }
+    if (user.password !== password) {
+      console.log(`VerifyUser: Password salah untuk user ${id}`);
+      return null;
+    }
+    if (!user.aktif) {
+      console.log(`VerifyUser: Akun ${id} tidak aktif`);
+      return null;
+    }
+    const { password: _pw, ...rest } = user;
+    return rest;
+  } catch (e: any) {
+    console.error("VerifyUser Error:", e.message);
+    return null;
+  }
 }
 
 // Registrasi user baru. Gagal bila User ID sudah dipakai.
-export async function appendUser(data: UserInput): Promise<User> {
+async function appendUserSheets(data: UserInput): Promise<User> {
   const sheets = await getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
   await ensureTab(sheets, spreadsheetId, USERS_TAB, USERS_HEADER);
-  const existing = await getUserById(data.id);
+  const existing = await getUserByIdSheets(data.id);
   if (existing) {
     throw new Error("User ID sudah terdaftar");
   }
@@ -536,6 +806,46 @@ export async function appendUser(data: UserInput): Promise<User> {
     requestBody: { values: [userToRow(user)] },
   });
   return user;
+}
+
+async function appendUserSupabase(data: UserInput): Promise<User> {
+  const existing = await getUserByIdSupabase(data.id);
+  if (existing) {
+    throw new Error("User ID sudah terdaftar");
+  }
+  try {
+    const { data: newUser, error } = await supabase
+      .from("users")
+      .insert([
+        {
+          id: data.id,
+          nama: data.nama,
+          nama_lengkap: data.namaLengkap,
+          password: data.password,
+          aktif: true,
+        },
+      ])
+      .select()
+      .single();
+    if (error) throw error;
+    return {
+      id: newUser.id,
+      nama: newUser.nama,
+      namaLengkap: newUser.nama_lengkap,
+      password: newUser.password,
+      aktif: newUser.aktif,
+      createdBy: newUser.id,
+      createdTime: newUser.created_at,
+      modifiedBy: newUser.id,
+      modifiedTime: newUser.updated_at,
+    };
+  } catch (e: any) {
+    throw new Error(`Supabase Insert Error: ${e.message}`);
+  }
+}
+
+export async function appendUser(data: UserInput): Promise<User> {
+  return DB_TYPE === "supabase" ? appendUserSupabase(data) : appendUserSheets(data);
 }
 
 // ===== Notifications =====
@@ -608,7 +918,7 @@ function parseDibaca(raw: string | undefined): boolean {
 }
 
 // Simpan banyak notifikasi sekaligus (mis. undangan + pemberitahuan anggota lama).
-export async function appendNotifications(
+async function appendNotificationsSheets(
   items: NotificationInput[],
   actor: string
 ): Promise<void> {
@@ -638,8 +948,33 @@ export async function appendNotifications(
   });
 }
 
+async function appendNotificationsSupabase(
+  items: NotificationInput[]
+): Promise<void> {
+  if (items.length === 0) return;
+  const { error } = await supabase.from("notifications").insert(
+    items.map((it) => ({
+      user_id: it.userId,
+      tipe: it.tipe,
+      pesan: it.pesan,
+      trip_id: it.tripId === "" ? null : it.tripId,
+      dibaca: false,
+    }))
+  );
+  if (error) throw error;
+}
+
+export async function appendNotifications(
+  items: NotificationInput[],
+  actor: string
+): Promise<void> {
+  return DB_TYPE === "supabase"
+    ? appendNotificationsSupabase(items)
+    : appendNotificationsSheets(items, actor);
+}
+
 // Daftar notifikasi milik user, terbaru di atas.
-export async function listNotificationsForUser(
+async function listNotificationsForUserSheets(
   userId: string
 ): Promise<Notification[]> {
   const sheets = await getSheetsClient();
@@ -658,9 +993,38 @@ export async function listNotificationsForUser(
     .reverse(); // baris terbaru ada di bawah -> tampilkan terbalik
 }
 
+async function listNotificationsForUserSupabase(
+  userId: string
+): Promise<Notification[]> {
+  const { data, error } = await supabase
+    .from("notifications")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data || []).map((n: any) => ({
+    id: n.id,
+    userId: n.user_id,
+    tipe: n.tipe,
+    pesan: n.pesan,
+    tripId: n.trip_id || "",
+    dibaca: n.dibaca,
+    createdBy: "",
+    createdTime: n.created_at,
+  }));
+}
+
+export async function listNotificationsForUser(
+  userId: string
+): Promise<Notification[]> {
+  return DB_TYPE === "supabase"
+    ? listNotificationsForUserSupabase(userId)
+    : listNotificationsForUserSheets(userId);
+}
+
 // Tandai notifikasi milik user sebagai sudah dibaca. Bila `ids` kosong/tak diisi,
 // tandai semua notifikasi user. Mengembalikan jumlah yang diperbarui.
-export async function markNotificationsRead(
+async function markNotificationsReadSheets(
   userId: string,
   ids?: string[]
 ): Promise<number> {
@@ -695,6 +1059,34 @@ export async function markNotificationsRead(
     requestBody: { valueInputOption: "RAW", data: updates },
   });
   return updates.length;
+}
+
+async function markNotificationsReadSupabase(
+  userId: string,
+  ids?: string[]
+): Promise<number> {
+  let query = supabase
+    .from("notifications")
+    .update({ dibaca: true })
+    .eq("user_id", userId)
+    .eq("dibaca", false);
+  
+  if (ids && ids.length > 0) {
+    query = query.in("id", ids);
+  }
+
+  const { data, error } = await query.select();
+  if (error) throw error;
+  return data?.length || 0;
+}
+
+export async function markNotificationsRead(
+  userId: string,
+  ids?: string[]
+): Promise<number> {
+  return DB_TYPE === "supabase"
+    ? markNotificationsReadSupabase(userId, ids)
+    : markNotificationsReadSheets(userId, ids);
 }
 
 // ===== Details =====
@@ -734,7 +1126,7 @@ function detailToRow(d: Detail): string[] {
   ];
 }
 
-export async function listDetails(tripId?: string): Promise<Detail[]> {
+async function listDetailsSheets(tripId?: string): Promise<Detail[]> {
   const sheets = await getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
   await ensureTab(sheets, spreadsheetId, DETAILS_TAB, DETAILS_HEADER);
@@ -750,7 +1142,35 @@ export async function listDetails(tripId?: string): Promise<Detail[]> {
   return items;
 }
 
-export async function appendDetail(
+async function listDetailsSupabase(tripId?: string): Promise<Detail[]> {
+  let query = supabase.from("trip_details").select("*").order("tanggal", { ascending: true });
+  if (tripId) {
+    query = query.eq("trip_id", tripId);
+  }
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data || []).map((d: any) => ({
+    id: d.id,
+    tripId: d.trip_id,
+    tanggal: d.tanggal,
+    jamBerangkat: d.jam_berangkat,
+    lokasiAsal: d.lokasi_asal,
+    lokasiTujuan: d.lokasi_tujuan,
+    estimasiDurasi: d.estimasi_durasi,
+    jamTiba: d.jam_tiba,
+    catatan: d.catatan,
+    createdBy: d.created_by,
+    createdTime: d.created_at,
+    modifiedBy: d.created_by,
+    modifiedTime: d.updated_at,
+  }));
+}
+
+export async function listDetails(tripId?: string): Promise<Detail[]> {
+  return DB_TYPE === "supabase" ? listDetailsSupabase(tripId) : listDetailsSheets(tripId);
+}
+
+async function appendDetailSheets(
   data: DetailInput,
   actor: string
 ): Promise<Detail> {
@@ -783,7 +1203,55 @@ export async function appendDetail(
   return item;
 }
 
-export async function deleteDetail(id: string): Promise<boolean> {
+async function appendDetailSupabase(
+  data: DetailInput,
+  actor: string
+): Promise<Detail> {
+  const { data: newDetail, error } = await supabase
+    .from("trip_details")
+    .insert([
+      {
+        trip_id: data.tripId,
+        tanggal: data.tanggal,
+        jam_berangkat: data.jamBerangkat,
+        lokasi_asal: data.lokasiAsal,
+        lokasi_tujuan: data.lokasiTujuan,
+        estimasi_durasi: data.estimasiDurasi,
+        jam_tiba: data.jamTiba,
+        catatan: data.catatan,
+        created_by: actor,
+      },
+    ])
+    .select()
+    .single();
+  if (error) throw error;
+  return {
+    id: newDetail.id,
+    tripId: newDetail.trip_id,
+    tanggal: newDetail.tanggal,
+    jamBerangkat: newDetail.jam_berangkat,
+    lokasiAsal: newDetail.lokasi_asal,
+    lokasiTujuan: newDetail.lokasi_tujuan,
+    estimasiDurasi: newDetail.estimasi_durasi,
+    jamTiba: newDetail.jam_tiba,
+    catatan: newDetail.catatan,
+    createdBy: newDetail.created_by,
+    createdTime: newDetail.created_at,
+    modifiedBy: newDetail.created_by,
+    modifiedTime: newDetail.updated_at,
+  };
+}
+
+export async function appendDetail(
+  data: DetailInput,
+  actor: string
+): Promise<Detail> {
+  return DB_TYPE === "supabase"
+    ? appendDetailSupabase(data, actor)
+    : appendDetailSheets(data, actor);
+}
+
+async function deleteDetailSheets(id: string): Promise<boolean> {
   const sheets = await getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
   const res = await sheets.spreadsheets.values.get({
@@ -818,8 +1286,18 @@ export async function deleteDetail(id: string): Promise<boolean> {
   return true;
 }
 
+async function deleteDetailSupabase(id: string): Promise<boolean> {
+  const { error } = await supabase.from("trip_details").delete().eq("id", id);
+  if (error) throw error;
+  return true;
+}
+
+export async function deleteDetail(id: string): Promise<boolean> {
+  return DB_TYPE === "supabase" ? deleteDetailSupabase(id) : deleteDetailSheets(id);
+}
+
 // Hapus semua detail milik sebuah trip (dipakai saat trip dihapus).
-async function deleteDetailsByTrip(tripId: string): Promise<void> {
+async function deleteDetailsByTripSheets(tripId: string): Promise<void> {
   const sheets = await getSheetsClient();
   const spreadsheetId = getSpreadsheetId();
   const res = await sheets.spreadsheets.values.get({
