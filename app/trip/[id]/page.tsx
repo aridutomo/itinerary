@@ -39,6 +39,28 @@ function isoToDMY(iso: string): string {
   return `${d}/${m}/${y}`;
 }
 
+// Hitung estimasi durasi dari selisih jam berangkat & tiba (format "HH:mm").
+// Mendukung lewat tengah malam. Output: "5 Menit" atau "1 Jam 20 Menit".
+function hitungEstimasi(berangkat: string, tiba: string): string {
+  const parse = (t: string) => {
+    const m = /^(\d{2}):(\d{2})$/.exec(t);
+    if (!m) return null;
+    return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  };
+  const a = parse(berangkat);
+  const b = parse(tiba);
+  if (a === null || b === null) return "";
+  let diff = b - a;
+  if (diff < 0) diff += 24 * 60; // lewat tengah malam
+  if (diff === 0) return "";
+  const jam = Math.floor(diff / 60);
+  const menit = diff % 60;
+  const bagian: string[] = [];
+  if (jam > 0) bagian.push(`${jam} Jam`);
+  if (menit > 0) bagian.push(`${menit} Menit`);
+  return bagian.join(" ");
+}
+
 // Format stempel waktu audit (ISO) menjadi "dd/mm/yyyy HH:MM" lokal.
 function formatStamp(iso: string): string {
   if (!iso) return "";
@@ -429,10 +451,11 @@ function AddDetailForm({
   const [jamTiba, setJamTiba] = useState("");
   const [lokasiAsal, setLokasiAsal] = useState("");
   const [lokasiTujuan, setLokasiTujuan] = useState("");
-  const [estimasiDurasi, setEstimasiDurasi] = useState("");
   const [catatan, setCatatan] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const estimasiDurasi = hitungEstimasi(jamBerangkat, jamTiba);
 
   function reset() {
     setTanggal("");
@@ -440,7 +463,6 @@ function AddDetailForm({
     setJamTiba("");
     setLokasiAsal("");
     setLokasiTujuan("");
-    setEstimasiDurasi("");
     setCatatan("");
     setErr(null);
   }
@@ -560,14 +582,18 @@ function AddDetailForm({
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="d-durasi">Estimasi di Jalan</Label>
+          <Label htmlFor="d-durasi">
+            Estimasi di Jalan{" "}
+            <span className="font-normal text-muted-foreground">(otomatis)</span>
+          </Label>
           <Input
             id="d-durasi"
             type="text"
             value={estimasiDurasi}
-            onChange={(e) => setEstimasiDurasi(e.target.value)}
-            placeholder="mis. 45 menit"
-            className="h-11"
+            readOnly
+            tabIndex={-1}
+            placeholder="Terisi dari jam berangkat & tiba"
+            className="h-11 cursor-default bg-muted/50 text-muted-foreground"
           />
         </div>
 

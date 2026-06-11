@@ -538,6 +538,165 @@ export async function appendUser(data: UserInput): Promise<User> {
   return user;
 }
 
+// ===== Notifications =====
+// Notifikasi in-app per user. Disimpan di tab "Notifications".
+// tipe: "undangan" (kamu diundang) | "anggota_baru" (ada orang baru ikut).
+export type Notification = {
+  id: string;
+  userId: string; // penerima notifikasi (User ID)
+  tipe: string;
+  pesan: string;
+  tripId: string;
+  dibaca: boolean; // flag sudah dibaca
+  createdBy: string;
+  createdTime: string;
+};
+
+// Field notifikasi yang dibuat dari luar (id/waktu/dibaca di-set otomatis).
+export type NotificationInput = {
+  userId: string;
+  tipe: string;
+  pesan: string;
+  tripId: string;
+};
+
+const NOTIFS_TAB = process.env.GOOGLE_SHEET_NOTIFS_TAB || "Notifications";
+
+const NOTIFS_HEADER = [
+  "ID",
+  "User ID",
+  "Tipe",
+  "Pesan",
+  "Trip ID",
+  "Dibaca",
+  "Dibuat Oleh",
+  "Dibuat Pada",
+];
+
+function rowToNotification(row: (string | undefined)[]): Notification {
+  return {
+    id: row[0] ?? "",
+    userId: row[1] ?? "",
+    tipe: row[2] ?? "",
+    pesan: row[3] ?? "",
+    tripId: row[4] ?? "",
+    dibaca: parseDibaca(row[5]),
+    createdBy: row[6] ?? "",
+    createdTime: row[7] ?? "",
+  };
+}
+
+function notificationToRow(n: Notification): string[] {
+  return [
+    n.id,
+    n.userId,
+    n.tipe,
+    n.pesan,
+    n.tripId,
+    n.dibaca ? "TRUE" : "FALSE",
+    n.createdBy,
+    n.createdTime,
+  ];
+}
+
+// Status dibaca: kosong dianggap belum dibaca. Hanya nilai true eksplisit
+// (TRUE / 1 / yes / ya / dibaca) yang dianggap sudah dibaca.
+function parseDibaca(raw: string | undefined): boolean {
+  if (raw === undefined || raw === null || raw.trim() === "") return false;
+  const v = raw.trim().toLowerCase();
+  return ["true", "1", "yes", "ya", "dibaca"].includes(v);
+}
+
+// Simpan banyak notifikasi sekaligus (mis. undangan + pemberitahuan anggota lama).
+export async function appendNotifications(
+  items: NotificationInput[],
+  actor: string
+): Promise<void> {
+  if (items.length === 0) return;
+  const sheets = await getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+  await ensureTab(sheets, spreadsheetId, NOTIFS_TAB, NOTIFS_HEADER);
+  const stamp = nowStamp();
+  const rows = items.map((it) =>
+    notificationToRow({
+      id: newId(),
+      userId: it.userId,
+      tipe: it.tipe,
+      pesan: it.pesan,
+      tripId: it.tripId,
+      dibaca: false,
+      createdBy: actor,
+      createdTime: stamp,
+    })
+  );
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${NOTIFS_TAB}!A2:H`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: rows },
+  });
+}
+
+// Daftar notifikasi milik user, terbaru di atas.
+export async function listNotificationsForUser(
+  userId: string
+): Promise<Notification[]> {
+  const sheets = await getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+  await ensureTab(sheets, spreadsheetId, NOTIFS_TAB, NOTIFS_HEADER);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${NOTIFS_TAB}!A2:H`,
+  });
+  const rows = res.data.values ?? [];
+  const uid = userId.toLowerCase().trim();
+  return rows
+    .filter((r) => r && r.length > 0 && r[0])
+    .map((r) => rowToNotification(r as string[]))
+    .filter((n) => n.userId.toLowerCase().trim() === uid)
+    .reverse(); // baris terbaru ada di bawah -> tampilkan terbalik
+}
+
+// Tandai notifikasi milik user sebagai sudah dibaca. Bila `ids` kosong/tak diisi,
+// tandai semua notifikasi user. Mengembalikan jumlah yang diperbarui.
+export async function markNotificationsRead(
+  userId: string,
+  ids?: string[]
+): Promise<number> {
+  const sheets = await getSheetsClient();
+  const spreadsheetId = getSpreadsheetId();
+  await ensureTab(sheets, spreadsheetId, NOTIFS_TAB, NOTIFS_HEADER);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${NOTIFS_TAB}!A2:H`,
+  });
+  const rows = res.data.values ?? [];
+  const uid = userId.toLowerCase().trim();
+  const idSet = ids && ids.length > 0 ? new Set(ids) : null;
+
+  const updates: { range: string; values: string[][] }[] = [];
+  rows.forEach((r, i) => {
+    const id = r[0];
+    const rowUser = (r[1] ?? "").toLowerCase().trim();
+    if (!id || rowUser !== uid) return;
+    if (idSet && !idSet.has(id)) return;
+    if (parseDibaca(r[5])) return; // sudah dibaca, lewati
+    const rowNumber = i + 2; // header di baris 1
+    updates.push({
+      range: `${NOTIFS_TAB}!F${rowNumber}`,
+      values: [["TRUE"]],
+    });
+  });
+
+  if (updates.length === 0) return 0;
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId,
+    requestBody: { valueInputOption: "RAW", data: updates },
+  });
+  return updates.length;
+}
+
 // ===== Details =====
 function rowToDetail(row: (string | undefined)[]): Detail {
   return {

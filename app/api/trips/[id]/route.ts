@@ -6,7 +6,10 @@ import {
   deleteTrip,
   listDetails,
   canAccessTrip,
+  listUsers,
+  appendNotifications,
   type Trip,
+  type NotificationInput,
 } from "@/lib/sheets";
 
 export const dynamic = "force-dynamic";
@@ -65,11 +68,74 @@ export async function PATCH(
     if (!trip) {
       return NextResponse.json({ error: "Rencana tidak ditemukan" }, { status: 404 });
     }
+
+    // Bila daftar orang berubah, kirim notifikasi in-app:
+    // - orang yang BARU diundang -> "kamu diundang"
+    // - anggota lama (kecuali aktor) -> "ada orang baru ikut"
+    if (Array.isArray(patch.orang)) {
+      await notifyOrangChanged(existing, trip, user).catch((e) => {
+        // Notifikasi bersifat best-effort: jangan gagalkan update trip.
+        console.error("Gagal mengirim notifikasi:", e);
+      });
+    }
+
     return NextResponse.json({ trip });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Gagal menyimpan";
     return NextResponse.json({ error: msg }, { status: 500 });
   }
+}
+
+// Susun & kirim notifikasi ketika daftar orang sebuah trip berubah.
+async function notifyOrangChanged(
+  before: Trip,
+  after: Trip,
+  actor: { id: string; name?: string | null }
+): Promise<void> {
+  const norm = (s: string) => s.toLowerCase().trim();
+  const beforeSet = new Set(before.orang.map(norm));
+  // Orang yang baru ditambahkan (ada di "after", tidak ada di "before").
+  const added = after.orang.filter((o) => !beforeSet.has(norm(o)));
+  if (added.length === 0) return;
+
+  // Peta User ID -> nama tampilan untuk pesan yang ramah.
+  const users = await listUsers();
+  const nameOf = (idOrName: string) => {
+    const u = users.find((x) => norm(x.id) === norm(idOrName));
+    return u?.nama || u?.namaLengkap || idOrName;
+  };
+
+  const tripLabel =
+    after.nama?.trim() || `${after.lokasiAsal} → ${after.lokasiTujuan}`;
+  const actorName = actor.name?.trim() || nameOf(actor.id);
+  const addedNorm = new Set(added.map(norm));
+  const notifs: NotificationInput[] = [];
+
+  // 1) Notifikasi undangan untuk tiap orang yang baru ditambahkan.
+  for (const person of added) {
+    if (norm(person) === norm(actor.id)) continue; // jangan kirim ke diri sendiri
+    notifs.push({
+      userId: person,
+      tipe: "undangan",
+      pesan: `${actorName} mengundang kamu ke rencana "${tripLabel}"`,
+      tripId: after.id,
+    });
+  }
+
+  // 2) Notifikasi "anggota baru" untuk anggota lama (kecuali aktor & yg baru).
+  const addedLabels = added.map(nameOf).join(", ");
+  for (const member of before.orang) {
+    if (norm(member) === norm(actor.id)) continue;
+    if (addedNorm.has(norm(member))) continue;
+    notifs.push({
+      userId: member,
+      tipe: "anggota_baru",
+      pesan: `${addedLabels} ditambahkan ke rencana "${tripLabel}" oleh ${actorName}`,
+      tripId: after.id,
+    });
+  }
+
+  await appendNotifications(notifs, actor.id);
 }
 
 export async function DELETE(

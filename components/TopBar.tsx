@@ -5,6 +5,7 @@ import { signOut, useSession } from "next-auth/react";
 import { LogOut } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import NotificationBell from "@/components/NotificationBell";
 
 export default function TopBar({ title }: { title: string }) {
   const { data } = useSession();
@@ -34,6 +35,7 @@ export default function TopBar({ title }: { title: string }) {
             )}
           </span>
         </Link>
+        <NotificationBell />
         <Button
           variant="outline"
           size="sm"
